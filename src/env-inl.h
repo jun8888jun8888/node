@@ -194,6 +194,8 @@ inline Environment::Environment(IsolateData* isolate_data,
 
   RB_INIT(&cares_task_list_);
   AssignToContext(context);
+
+  destroy_ids_list_.reserve(512);
 }
 
 inline Environment::~Environment() {
@@ -245,6 +247,15 @@ inline uv_check_t* Environment::immediate_check_handle() {
 
 inline uv_idle_t* Environment::immediate_idle_handle() {
   return &immediate_idle_handle_;
+}
+
+inline Environment* Environment::from_destroy_ids_idle_handle(
+    uv_idle_t* handle) {
+  return ContainerOf(&Environment::destroy_ids_idle_handle_, handle);
+}
+
+inline uv_idle_t* Environment::destroy_ids_idle_handle() {
+  return &destroy_ids_idle_handle_;
 }
 
 inline void Environment::RegisterHandleCleanup(uv_handle_t* handle,
@@ -301,22 +312,26 @@ inline int64_t Environment::get_async_wrap_uid() {
   return ++async_wrap_uid_;
 }
 
-inline uint32_t* Environment::heap_statistics_buffer() const {
+inline std::vector<int64_t>* Environment::destroy_ids_list() {
+  return &destroy_ids_list_;
+}
+
+inline double* Environment::heap_statistics_buffer() const {
   CHECK_NE(heap_statistics_buffer_, nullptr);
   return heap_statistics_buffer_;
 }
 
-inline void Environment::set_heap_statistics_buffer(uint32_t* pointer) {
+inline void Environment::set_heap_statistics_buffer(double* pointer) {
   CHECK_EQ(heap_statistics_buffer_, nullptr);  // Should be set only once.
   heap_statistics_buffer_ = pointer;
 }
 
-inline uint32_t* Environment::heap_space_statistics_buffer() const {
+inline double* Environment::heap_space_statistics_buffer() const {
   CHECK_NE(heap_space_statistics_buffer_, nullptr);
   return heap_space_statistics_buffer_;
 }
 
-inline void Environment::set_heap_space_statistics_buffer(uint32_t* pointer) {
+inline void Environment::set_heap_space_statistics_buffer(double* pointer) {
   CHECK_EQ(heap_space_statistics_buffer_, nullptr);  // Should be set only once.
   heap_space_statistics_buffer_ = pointer;
 }
@@ -443,9 +458,9 @@ inline v8::Local<v8::Object> Environment::NewInternalFieldObject() {
   return m_obj.ToLocalChecked();
 }
 
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   inline                                                                      \
   v8::Local<TypeName> IsolateData::PropertyName(v8::Isolate* isolate) const { \
     /* Strings are immutable so casting away const-ness here is okay. */      \
@@ -457,9 +472,9 @@ inline v8::Local<v8::Object> Environment::NewInternalFieldObject() {
 #undef VS
 #undef VP
 
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   inline v8::Local<TypeName> Environment::PropertyName() const {              \
     return isolate_data()->PropertyName(isolate());                           \
   }

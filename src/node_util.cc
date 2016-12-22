@@ -20,7 +20,6 @@ using v8::Value;
 
 #define VALUE_METHOD_MAP(V)                                                   \
   V(isArrayBuffer, IsArrayBuffer)                                             \
-  V(isSharedArrayBuffer, IsSharedArrayBuffer)                                 \
   V(isDataView, IsDataView)                                                   \
   V(isDate, IsDate)                                                           \
   V(isMap, IsMap)                                                             \
@@ -29,7 +28,9 @@ using v8::Value;
   V(isRegExp, IsRegExp)                                                       \
   V(isSet, IsSet)                                                             \
   V(isSetIterator, IsSetIterator)                                             \
-  V(isTypedArray, IsTypedArray)
+  V(isSharedArrayBuffer, IsSharedArrayBuffer)                                 \
+  V(isTypedArray, IsTypedArray)                                               \
+  V(isUint8Array, IsUint8Array)
 
 
 #define V(_, ucname) \

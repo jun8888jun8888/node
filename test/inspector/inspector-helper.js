@@ -5,6 +5,9 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const spawn = require('child_process').spawn;
+const url = require('url');
+
+const DEBUG = false;
 
 const TIMEOUT = 15 * 1000;
 
@@ -13,6 +16,8 @@ const mainScript = path.join(common.fixturesDir, 'loop.js');
 function send(socket, message, id, callback) {
   const msg = JSON.parse(JSON.stringify(message)); // Clone!
   msg['id'] = id;
+  if (DEBUG)
+    console.log('[sent]', JSON.stringify(msg));
   const messageBuf = Buffer.from(JSON.stringify(msg));
 
   const wsHeaderBuf = Buffer.allocUnsafe(16);
@@ -61,6 +66,8 @@ function parseWSFrame(buffer, handler) {
     return 0;
   const message = JSON.parse(
       buffer.slice(bodyOffset, bodyOffset + dataLen).toString('utf8'));
+  if (DEBUG)
+    console.log('[received]', JSON.stringify(message));
   handler(message);
   return bodyOffset + dataLen;
 }
@@ -79,18 +86,28 @@ function checkHttpResponse(port, path, callback) {
     res.setEncoding('utf8');
     res
       .on('data', (data) => response += data.toString())
-      .on('end', () => callback(JSON.parse(response)));
+      .on('end', () => {
+        let err = null;
+        let json = undefined;
+        try {
+          json = JSON.parse(response);
+        } catch (e) {
+          err = e;
+          err.response = response;
+        }
+        callback(err, json);
+      });
   });
 }
 
 function makeBufferingDataCallback(dataCallback) {
-  let buffer = new Buffer(0);
+  let buffer = Buffer.alloc(0);
   return (data) => {
     const newData = Buffer.concat([buffer, data]);
     const str = newData.toString('utf8');
     const lines = str.split('\n');
     if (str.endsWith('\n'))
-      buffer = new Buffer(0);
+      buffer = Buffer.alloc(0);
     else
       buffer = Buffer.from(lines.pop(), 'utf8');
     for (var line of lines)
@@ -117,7 +134,7 @@ const TestSession = function(socket, harness) {
   this.expectedId_ = 1;
   this.lastMessageResponseCallback_ = null;
 
-  let buffer = Buffer.from('');
+  let buffer = Buffer.alloc(0);
   socket.on('data', (data) => {
     buffer = Buffer.concat([buffer, data]);
     let consumed;
@@ -195,9 +212,10 @@ TestSession.prototype.sendInspectorCommands = function(commands) {
       timeoutId = setTimeout(() => {
         let s = '';
         for (const id in this.messages_) {
-          s += this.messages_[id] + '\n';
+          s += id + ', ';
         }
-        common.fail(s.substring(0, s.length - 1));
+        common.fail('Messages without response: ' +
+                    s.substring(0, s.length - 2));
       }, TIMEOUT);
     });
   });
@@ -241,7 +259,7 @@ TestSession.prototype.expectStderrOutput = function(regexp) {
 
 TestSession.prototype.runNext_ = function() {
   if (this.task_) {
-    setTimeout(() => {
+    setImmediate(() => {
       this.task_(() => {
         this.task_ = this.task_.next_;
         this.runNext_();
@@ -268,10 +286,20 @@ TestSession.prototype.disconnect = function(childDone) {
     this.expectClose_ = true;
     this.harness_.childInstanceDone =
         this.harness_.childInstanceDone || childDone;
-    this.socket_.end();
+    this.socket_.destroy();
+    console.log('[test]', 'Connection terminated');
     callback();
   });
 };
+
+TestSession.prototype.testHttpResponse = function(path, check) {
+  return this.enqueue((callback) =>
+      checkHttpResponse(this.harness_.port, path, (err, response) => {
+        check.call(this, err, response);
+        callback();
+      }));
+};
+
 
 const Harness = function(port, childProcess) {
   this.port = port;
@@ -293,7 +321,7 @@ const Harness = function(port, childProcess) {
       if (!filter(message)) pending.push(filter);
     this.stderrFilters_ = pending;
   }));
-  childProcess.on('close', (code, signal) => {
+  childProcess.on('exit', (code, signal) => {
     assert(this.childInstanceDone, 'Child instance died prematurely');
     this.returnCode_ = code;
     this.running_ = false;
@@ -310,7 +338,7 @@ Harness.prototype.addStderrFilter = function(regexp, callback) {
 };
 
 Harness.prototype.run_ = function() {
-  setTimeout(() => {
+  setImmediate(() => {
     this.task_(() => {
       this.task_ = this.task_.next_;
       if (this.task_)
@@ -334,44 +362,51 @@ Harness.prototype.enqueue_ = function(task) {
 
 Harness.prototype.testHttpResponse = function(path, check) {
   return this.enqueue_((doneCallback) => {
-    checkHttpResponse(this.port, path, (response) => {
-      check.call(this, response);
+    checkHttpResponse(this.port, path, (err, response) => {
+      check.call(this, err, response);
       doneCallback();
     });
   });
 };
 
+Harness.prototype.wsHandshake = function(devtoolsUrl, tests, readyCallback) {
+  http.get({
+    port: this.port,
+    path: url.parse(devtoolsUrl).path,
+    headers: {
+      'Connection': 'Upgrade',
+      'Upgrade': 'websocket',
+      'Sec-WebSocket-Version': 13,
+      'Sec-WebSocket-Key': 'key=='
+    }
+  }).on('upgrade', (message, socket) => {
+    const session = new TestSession(socket, this);
+    if (!(tests instanceof Array))
+      tests = [tests];
+    function enqueue(tests) {
+      session.enqueue((sessionCb) => {
+        if (tests.length) {
+          tests[0](session);
+          session.enqueue((cb2) => {
+            enqueue(tests.slice(1));
+            cb2();
+          });
+        } else {
+          readyCallback();
+        }
+        sessionCb();
+      });
+    }
+    enqueue(tests);
+  }).on('response', () => common.fail('Upgrade was not received'));
+};
+
 Harness.prototype.runFrontendSession = function(tests) {
   return this.enqueue_((callback) => {
-    http.get({
-      port: this.port,
-      path: '/node',
-      headers: {
-        'Connection': 'Upgrade',
-        'Upgrade': 'websocket',
-        'Sec-WebSocket-Version': 13,
-        'Sec-WebSocket-Key': 'key=='
-      }
-    }).on('upgrade', (message, socket) => {
-      const session = new TestSession(socket, this);
-      if (!(tests instanceof Array))
-        tests = [tests];
-      function enqueue(tests) {
-        session.enqueue((sessionCb) => {
-          if (tests.length) {
-            tests[0](session);
-            session.enqueue((cb2) => {
-              enqueue(tests.slice(1));
-              cb2();
-            });
-          } else {
-            callback();
-          }
-          sessionCb();
-        });
-      }
-      enqueue(tests);
-    }).on('response', () => common.fail('Upgrade was not received'));
+    checkHttpResponse(this.port, '/json/list', (err, response) => {
+      assert.ifError(err);
+      this.wsHandshake(response[0]['webSocketDebuggerUrl'], tests, callback);
+    });
   });
 };
 

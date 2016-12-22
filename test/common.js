@@ -1,21 +1,21 @@
 /* eslint-disable required-modules */
 'use strict';
-var path = require('path');
-var fs = require('fs');
-var assert = require('assert');
-var os = require('os');
-var child_process = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const assert = require('assert');
+const os = require('os');
+const child_process = require('child_process');
 const stream = require('stream');
+const buffer = require('buffer');
 const util = require('util');
 const Timer = process.binding('timer_wrap').Timer;
 
 const testRoot = process.env.NODE_TEST_DIR ?
                    path.resolve(process.env.NODE_TEST_DIR) : __dirname;
 
-exports.testDir = __dirname;
-exports.fixturesDir = path.join(exports.testDir, 'fixtures');
-exports.libDir = path.join(exports.testDir, '../lib');
+exports.fixturesDir = path.join(__dirname, 'fixtures');
 exports.tmpDirName = 'tmp';
+// PORT should match the definition in test/testpy/__init__.py.
 exports.PORT = +process.env.NODE_COMMON_PORT || 12346;
 exports.isWindows = process.platform === 'win32';
 exports.isWOW64 = exports.isWindows &&
@@ -30,7 +30,15 @@ exports.isLinux = process.platform === 'linux';
 exports.isOSX = process.platform === 'darwin';
 
 exports.enoughTestMem = os.totalmem() > 0x40000000; /* 1 Gb */
+exports.bufferMaxSizeMsg = new RegExp('^RangeError: "size" argument' +
+                                      ' must not be larger than ' +
+                                      buffer.kMaxLength + '$');
+const cpus = os.cpus();
+exports.enoughTestCpu = Array.isArray(cpus) &&
+                        (cpus.length > 1 || cpus[0].speed > 999);
+
 exports.rootDir = exports.isWindows ? 'c:\\' : '/';
+exports.buildType = process.config.target_defaults.default_configuration;
 
 function rimrafSync(p) {
   try {
@@ -189,13 +197,6 @@ if (exports.isWindows) {
   exports.PIPE = exports.tmpDir + '/test.sock';
 }
 
-if (exports.isWindows) {
-  exports.faketimeCli = false;
-} else {
-  exports.faketimeCli = path.join(__dirname, '..', 'tools', 'faketime', 'src',
-                                  'faketime');
-}
-
 var ifaces = os.networkInterfaces();
 exports.hasIPv6 = Object.keys(ifaces).some(function(name) {
   return /lo/.test(name) && ifaces[name].some(function(info) {
@@ -203,6 +204,28 @@ exports.hasIPv6 = Object.keys(ifaces).some(function(name) {
   });
 });
 
+/*
+ * Check that when running a test with
+ * `$node --abort-on-uncaught-exception $file child`
+ * the process aborts.
+ */
+exports.childShouldThrowAndAbort = function() {
+  var testCmd = '';
+  if (!exports.isWindows) {
+    // Do not create core files, as it can take a lot of disk space on
+    // continuous testing and developers' machines
+    testCmd += 'ulimit -c 0 && ';
+  }
+  testCmd += `${process.argv[0]} --abort-on-uncaught-exception `;
+  testCmd += `${process.argv[1]} child`;
+  const child = child_process.exec(testCmd);
+  child.on('exit', function onExit(exitCode, signal) {
+    const errMsg = 'Test should have aborted ' +
+                   `but instead exited with exit code ${exitCode}` +
+                   ` and signal ${signal}`;
+    assert(exports.nodeProcessAborted(exitCode, signal), errMsg);
+  });
+};
 
 exports.ddCommand = function(filename, kilobytes) {
   if (exports.isWindows) {
@@ -279,17 +302,19 @@ exports.platformTimeout = function(ms) {
   return ms; // ARMv8+
 };
 
-var knownGlobals = [setTimeout,
-                    setInterval,
-                    setImmediate,
-                    clearTimeout,
-                    clearInterval,
-                    clearImmediate,
-                    console,
-                    constructor, // Enumerable in V8 3.21.
-                    Buffer,
-                    process,
-                    global];
+var knownGlobals = [
+  Buffer,
+  clearImmediate,
+  clearInterval,
+  clearTimeout,
+  console,
+  constructor, // Enumerable in V8 3.21.
+  global,
+  process,
+  setImmediate,
+  setInterval,
+  setTimeout
+];
 
 if (global.gc) {
   knownGlobals.push(global.gc);
@@ -354,7 +379,7 @@ function leakedGlobals() {
   var leaked = [];
 
   for (var val in global)
-    if (-1 === knownGlobals.indexOf(global[val]))
+    if (!knownGlobals.includes(global[val]))
       leaked.push(val);
 
   return leaked;
@@ -369,7 +394,7 @@ process.on('exit', function() {
   var leaked = leakedGlobals();
   if (leaked.length > 0) {
     console.error('Unknown globals: %s', leaked);
-    assert.ok(false, 'Unknown global found');
+    fail('Unknown global found');
   }
 });
 
@@ -434,9 +459,10 @@ exports.fileExists = function(pathname) {
   }
 };
 
-exports.fail = function(msg) {
+function fail(msg) {
   assert.fail(null, null, msg);
-};
+}
+exports.fail = fail;
 
 exports.skip = function(msg) {
   console.log(`1..0 # Skipped: ${msg}`);
@@ -487,9 +513,9 @@ exports.nodeProcessAborted = function nodeProcessAborted(exitCode, signal) {
   // one of them (exit code or signal) needs to be set to one of
   // the expected exit codes or signals.
   if (signal !== null) {
-    return expectedSignals.indexOf(signal) > -1;
+    return expectedSignals.includes(signal);
   } else {
-    return expectedExitCodes.indexOf(exitCode) > -1;
+    return expectedExitCodes.includes(exitCode);
   }
 };
 
@@ -507,3 +533,22 @@ exports.isAlive = function isAlive(pid) {
     return false;
   }
 };
+
+exports.expectWarning = function(name, expected) {
+  if (typeof expected === 'string')
+    expected = [expected];
+  process.on('warning', exports.mustCall((warning) => {
+    assert.strictEqual(warning.name, name);
+    assert.ok(expected.includes(warning.message),
+              `unexpected error message: "${warning.message}"`);
+    // Remove a warning message after it is seen so that we guarantee that we
+    // get each message only once.
+    expected.splice(expected.indexOf(warning.message), 1);
+  }, expected.length));
+};
+
+Object.defineProperty(exports, 'hasIntl', {
+  get: function() {
+    return process.binding('config').hasIntl;
+  }
+});
